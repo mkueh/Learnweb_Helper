@@ -1,163 +1,172 @@
 #!/usr/bin/env python3
 
-# https://regex101.com/
+# Put this file in to execute it from any console
+#
+#
 
-import os, glob, re, csv
-import argparse, time, pickle
-
-from collections import OrderedDict
+import configparser, argparse, time, locale, collections
+import os, sys, glob, re, csv, numpy, pickle, shutil, glob
 from zipfile import ZipFile
 
-ACTION_PACK = 'pack'
-ACTION_UNPACK = 'unpack'
+def main(delete):
+    var = input("Type unpack or pack: ")
+    #var = "pack"
 
+    if(var == "unpack"):
+        groupe = input("Type groupe: ")
+        #groupe = "WI05"
+        zipFiles = glob.glob('*.zip')
 
-def getExerciseGroups(zipFilePath, studentNames):
+        for f in zipFiles:
+            fileName = os.path.splitext(f)[0]
+
+            taskname = getInformationFromZipname(f)
+            studentIds = getStudents(f, groupe, taskname)
+
+            createDirectoryStructure(f, studentIds, taskname)
+            createValuationFile(f, studentIds)
+
+    if(var == "pack"):
+        numpyFiles = glob.glob('*.info')
+        for f in numpyFiles:
+            zipFilePath = f[:-4]
+            infoFilePath = f
+            zipFilePath = zipFilePath.strip()
+            infoFilePath = infoFilePath.strip()
+            createZipFile(zipFilePath,infoFilePath)
+
+def getInformationFromZipname(zipFilePath:str) -> str:
+    split = zipFilePath.split("-")
+    taskName = split[2]
+    return taskName
+
+def getStudents(zipFilePath:str, group:str, taskname:str) -> dict:
     currentFile = ZipFile(zipFilePath, 'r');    
-    out = {} # Dict grpName => {students, files}
-
-    regex = r"((?P<grp>.*?)_)?(?P<name>.*?)_(?P<id>[0-9]*)_assignsubmission_file_"
+    out = {} # Empyt dict (grp, nr, vid)
 
     for exerciseFile in currentFile.namelist():
-        matches = re.match(regex, exerciseFile, re.DOTALL)
-        
-        if matches:
-            grp = matches.group("grp")
-            name = matches.group("name")
-            
-            if not grp: grp = name
-            
-            if name not in studentNames: continue
-            
-            if grp not in out:
+        split = exerciseFile.split("-")
+        if(group in split[0]):
+            temp = split[0].split(" ")
+            grp = temp[1] + " " + temp[2]
+
+            if(grp not in out):
                 out[grp] = {}
-                out[grp]["students"] = []
+                out[grp]["task"] = taskname
+                out[grp]["student"] = []
                 out[grp]["files"] = []
-            
+                        
             student = {}
-            student["name"] = matches.group("name")
-            student["id"] = matches.group("id")
-            
-            if student not in out[grp]["students"]: out[grp]["students"].append(student)
-            if not checkIfFileIsInserted(out[grp]["files"], os.path.basename(exerciseFile)):
+            temp = exerciseFile.split("_")
+            student["name"] = temp[0][len(split[0])+1:len(temp[0])]
+            student["id"] = temp[1]
+            if student not in out[grp]["student"]:
+                out[grp]["student"].append(student)
+            if(not checkIfFileisInserted(out[grp]["files"], os.path.basename(exerciseFile))):
                 out[grp]["files"].append(exerciseFile)
     
-    return OrderedDict(sorted(out.items(), key=lambda t: t[0]))
+    return collections.OrderedDict(sorted(out.items()))
 
-
-def checkIfFileIsInserted(l:list,s:str) -> bool:
+def checkIfFileisInserted(l:list,s:str) -> bool:
     for i in l:
         if s in i:
             return True
     return False
 
-
-def createDirectoryStructure(zipFilePath, groups):
+def createDirectoryStructure(zipFilePath, studentIds:dict, taskname:str):
     currentFile = ZipFile(zipFilePath, 'r')
-    exerciseName = os.path.splitext(zipFilePath)[0]
+    fileName = os.path.splitext(zipFilePath)[0]
     
-    for grpName, obj in groups.items():
-        if not os.path.exists(grpName): os.makedirs(grpName)
+    for groupe in studentIds: 
+        path = str(groupe)
+        item = studentIds[groupe]
 
-        for exerciseFile in obj["files"]:
-            currentFile.extract(exerciseFile, grpName)
-        
-        if obj["files"]:
-            oldPath = os.path.join(grpName, os.path.dirname(obj["files"][0]))
-            newPath = os.path.join(grpName, exerciseName)
+        #erstelle Ordner für Gruppe
+        if not os.path.exists(path): os.makedirs(path)
 
-            os.rename(oldPath, newPath)
+        #kopiere Abgabe in den Ordner der Gruppe
+        newfiles = []
+        for exerciseFile in item["files"]:
+
+            exerciseFileName = os.path.dirname(exerciseFile)
+            uploadName = taskname
             
-            obj["files"] = [os.path.join(newPath,os.path.basename(it)) for it in obj["files"]]
-    
-    with open(exerciseName+'.info', "wb") as infoFile:
-        pickle.dump(groups, infoFile)
-        
+            currentFile.extract(exerciseFile, path)
+            
+            oldPath = os.path.join(path, os.path.dirname(exerciseFile))
+            newPath = os.path.join(path, uploadName)
+            
+            if not os.path.exists(newPath): 
+                os.rename(oldPath, newPath)
+            else:
+                shutil.move(os.path.join(path, exerciseFile), os.path.join(newPath,os.path.basename(exerciseFile)))
+                shutil.rmtree(oldPath)
+
+            newfiles.append(os.path.join(newPath,os.path.basename(exerciseFile)))              
+        item["files"] = newfiles
+
+    #speichere Zuordnungtabelle
+    #numpy.save(taskname+'.npy', studentIds)
+    with open(taskname+'.info', "wb") as myFile:
+        pickle.dump(studentIds, myFile)
     currentFile.close()
 
 
-def isSingleStudentExercise(groups):
-    for grpName, obj in groups.items():
-        if grpName == obj["students"][0]: return False
+def createValuationFile(zipFilePath, studentIds):
+    header = ['ID', 'Gruppe', 'Bewertung', 'Zuletzt geändert (Bewertung)']
+    row = ['Teilnehmer/in{}', '{}', '', time.strftime('%A, %d. %B %Y, %H:%M')]
         
-    return True
+    currentFile = ZipFile(zipFilePath, 'r')
+    fileName = os.path.splitext(zipFilePath)[0]
 
-
-def createValuationFile(zipFilePath, groups):
-    header = ['ID', 'Vollständiger Name', 'Gruppe', 'Bewertung', 'Zuletzt geändert (Bewertung)']
-    row = ['Teilnehmer/in{}', '{}', '{}', '', time.strftime('%A, %d. %B %Y, %H:%M')]
+    out = open(fileName + '.csv', 'wt', encoding='utf-8')
     
-    singleExercise = isSingleStudentExercise(groups)
-    
-    if singleExercise: # Remove Gruppe item from csv
-        header.pop(2) 
-        row.pop(2)
-        
-    currentFile = ZipFile(zipFilePath, 'r');
-    exerciseName = os.path.splitext(zipFilePath)[0]
-
-    out = open(exerciseName + '.csv', 'wt', encoding='utf-8')
-    
-    writer = csv.writer(out, delimiter=',', lineterminator='\n', quoting=csv.QUOTE_ALL)
+    writer = csv.writer(out, delimiter=';', lineterminator='\n', quoting=csv.QUOTE_ALL)
     writer.writerow(header)
 
-    for grpName, obj in groups.items():
-        
-        for student in obj["students"]:
+    for grp in studentIds:
+        for stu in studentIds[grp]["student"]:
             newRow = list(row)
-            
-            newRow[0] = newRow[0].format(student["id"])
-            newRow[1] = newRow[1].format(student["name"])
-            
-            if not singleExercise: newRow[2] = newRow[2].format(grpName)
-            
+            newRow[0] = newRow[0].format(stu["id"])
+            newRow[1] = newRow[1].format(grp)
             writer.writerow(newRow)
           
     out.close()
 
+def createZipFile(zipFilePath,infoFilePath):
+    with open(infoFilePath, "rb") as myFile:
+        dic = pickle.load(myFile)
 
-def createZipFile(zipFilePath, infoFilePath):
-    with open(infoFilePath, "rb") as infoFile:
-        groups = pickle.load(infoFile)
-
-    newZip = ZipFile(zipFilePath + "-Feedback.zip", 'w')
-    
-    for grpName, obj in groups.items():
-		    
-        for student in obj["students"]:
-            files = obj["files"]
-            
-            for f in files:
-                filename = os.path.basename(f)
-                newZip.write(f,os.path.join(student["name"]+"_"+student["id"]+ "_assignsubmission_file_",filename))
-    
+    newZip = ZipFile(zipFilePath+"zip", 'w')
+    for grp in dic:
+        for stu in dic[grp]["student"]:
+            folderpath = os.path.join(grp,dic[grp]["task"])
+            folderpath = folderpath.strip()
+            zipfile = createZipOfFolder(folderpath)
+            newZip.write(zipfile,os.path.join(stu["name"]+"_"+stu["id"]+"_assignsubmission_file_","Feedback.zip"))
+        os.remove(zipfile)
     newZip.close()
 
+def createZipOfFolder(folderpath:str) -> str:    
+    if os.path.exists(os.path.join(folderpath,"Feedback.zip")):
+        return os.path.join(folderpath,"Feedback.zip")
+
+    globsearch = os.path.join(folderpath,"*.*")
+    Files = glob.glob(globsearch)
+    newZip = ZipFile(os.path.join(folderpath,"Feedback.zip"), 'w')
+
+    for f in Files:
+        newZip.write(f,os.path.basename(f))
+
+    newZip.close()
+    return os.path.join(folderpath,"Feedback.zip")
 
 if __name__ == "__main__":    
     parser = argparse.ArgumentParser(description='Creates file and folder structure for student exercises.')
-    
-    parser.add_argument('action', type=str, choices=[ACTION_PACK, ACTION_UNPACK], help="the action the script should perform")
-    parser.add_argument('-f', type=str, metavar="file", default="Teilnehmer.txt", help="specifies a file with student names")
-    
+    parser.add_argument('-t', '--tut', action='store', default="DEFAULT", help="Specifies the tutorium to execute (use with -c to configure it)")
+    parser.add_argument('-d', '--del', action='store_true', help="Delets all zip files from the directory after execution")
+
     args = vars(parser.parse_args())
-    
-    if args['action'] == ACTION_UNPACK:
-        zipFiles = glob.glob('*.zip');
+    name = args['tut']
 
-        with open(args['f']) as namesFile:
-            studentNames = namesFile.readlines()
-
-        # remove whitespace characters like \n at the end of each line
-        studentNames = [x.strip() for x in studentNames]  
-
-        for f in zipFiles:
-            fileName = os.path.splitext(f)[0]
-            groups = getExerciseGroups(f, studentNames)
-
-            createDirectoryStructure(f, groups)
-            createValuationFile(f, groups)
-            
-    elif args['action'] == ACTION_PACK:
-        infoFiles = glob.glob('*.info')
-        for f in infoFiles: createZipFile(f[:-5],f)
+    main(args['del'])
